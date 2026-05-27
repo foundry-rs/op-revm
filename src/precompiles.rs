@@ -11,7 +11,7 @@ use revm::{
     },
     primitives::{hardfork::SpecId, Address, OnceLock},
 };
-use std::{boxed::Box, string::String};
+use std::string::String;
 
 /// Optimism precompile provider
 #[derive(Debug, Clone)]
@@ -145,7 +145,7 @@ where
     }
 
     #[inline]
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+    fn warm_addresses(&self) -> &revm::primitives::AddressSet {
         self.inner.warm_addresses()
     }
 

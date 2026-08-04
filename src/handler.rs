@@ -24,7 +24,10 @@ use revm::{
         EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
-    interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit, Gas, InitialAndFloorGas},
+    interpreter::{
+        interpreter::EthInterpreter, interpreter_action::FrameInit, Gas, GasTracker,
+        InitialAndFloorGas,
+    },
     primitives::{hardfork::SpecId, U256},
 };
 use std::{boxed::Box, vec::Vec};
@@ -185,6 +188,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        parent_gas: &mut GasTracker,
     ) -> Result<(), Self::Error> {
         let ctx = evm.ctx();
         let tx = ctx.tx();
@@ -200,7 +204,7 @@ where
         let state_gas_spent = gas.state_gas_spent();
 
         // Spend the gas limit. Gas is reimbursed when the tx returns successfully.
-        *gas = Gas::new_spent(tx_gas_limit);
+        *gas = Gas::new_spent_with_reservoir(tx_gas_limit, reservoir);
 
         if instruction_result.is_ok() {
             // On Optimism, deposit transactions report gas usage uniquely to other
@@ -247,6 +251,7 @@ where
         // Restore state_gas_spent on all paths (lost by Gas::new_spent overwrite).
         gas.set_state_gas_spent(state_gas_spent);
         gas.set_reservoir(reservoir);
+        *parent_gas = *gas.tracker();
 
         Ok(())
     }
@@ -276,7 +281,7 @@ where
         evm: &mut Self::Evm,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         eip7702_refund: i64,
-    ) {
+    ) -> Result<(), Self::Error> {
         frame_result.gas_mut().record_refund(eip7702_refund);
 
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
@@ -284,15 +289,17 @@ where
 
         // Prior to Regolith, deposit transactions did not receive gas refunds.
         let is_gas_refund_disabled = is_deposit && !is_regolith;
-        if !is_gas_refund_disabled {
-            frame_result.gas_mut().set_final_refund(
-                evm.ctx()
-                    .cfg()
-                    .spec()
-                    .into_eth_spec()
-                    .is_enabled_in(SpecId::LONDON),
-            );
+        if !is_gas_refund_disabled
+            && evm
+                .ctx()
+                .cfg()
+                .spec()
+                .into_eth_spec()
+                .is_enabled_in(SpecId::LONDON)
+        {
+            frame_result.gas_mut().set_final_refund(5);
         }
+        Ok(())
     }
 
     fn reward_beneficiary(
@@ -499,10 +506,15 @@ mod tests {
         let mut handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
 
+        let mut parent_gas = GasTracker::new(
+            exec_result.gas().limit(),
+            exec_result.gas().remaining(),
+            exec_result.gas().reservoir(),
+        );
         handler
-            .last_frame_result(&mut evm, &mut exec_result)
+            .last_frame_result(&mut evm, &mut exec_result, &mut parent_gas)
             .unwrap();
-        handler.refund(&mut evm, &mut exec_result, 0);
+        handler.refund(&mut evm, &mut exec_result, 0).unwrap();
         *exec_result.gas()
     }
 
